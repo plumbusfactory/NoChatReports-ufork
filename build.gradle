@@ -1,6 +1,8 @@
 plugins {
     id 'java'
     id 'com.gradleup.shadow' version '9.4.1'
+    // Applied per version in nms/build.gradle; declared once here so every module shares one copy
+    id 'io.papermc.paperweight.userdev' version '2.0.0-beta.24' apply false
 }
 
 allprojects {
@@ -75,21 +77,9 @@ tasks.assemble {
 dependencies {
     implementation project(":plugin")
     implementation project(":nms:common")
-//    implementation project(":nms:v1_19_4")
-    implementation project(path: ":nms:v1_19_4", configuration: "reobf")
-    implementation project(path: ":nms:v1_20_4", configuration: "reobf")
-    implementation project(path: ":nms:v1_20_6", configuration: "reobf")
-    implementation project(path: ":nms:v1_21", configuration: "reobf")
-    implementation project(path: ":nms:v1_21_4", configuration: "reobf")
-    implementation project(path: ":nms:v1_21_5", configuration: "reobf")
-    implementation project(path: ":nms:v1_21_8", configuration: "reobf")
-    implementation project(path: ":nms:v1_21_10", configuration: "reobf")
-    implementation project(path: ":nms:v1_21_11", configuration: "reobf")
-    implementation project(path: ":nms:v26_1_2", configuration: "shadow")
-    implementation project(path: ":nms:v26_2", configuration: "shadow")
-    implementation project(path: ":nms:v26_3", configuration: "shadow")
-
-//    implementation "com.github.retrooper:packetevents-spigot:2.7.0-SNAPSHOT"
+    rootProject.findProject(':nms').subprojects.findAll { it.name ==~ /v\d.*/ }.each {
+        implementation project(path: it.path, configuration: 'nmsJar')
+    }
 }
 
 java {

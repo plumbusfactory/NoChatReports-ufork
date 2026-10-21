@@ -1,9 +1,113 @@
-assemble {
-    dependsOn shadowJar
-}
+import org.gradle.api.attributes.java.TargetJvmVersion
+
+// NMS layout
+//
+//   nms/common          version-independent API used by the plugin
+//   nms/shared/src/*    the NMS implementation, written once (package com.tcoded.nochatreports.nms.impl)
+//   nms/<version>       one VersionCompat.java holding everything specific to that Minecraft version
+//
+// Every version module compiles the shared sources against its own Paper dev bundle, then shadow
+// relocates nms.impl to nms.<version> so all versions can live side by side in the plugin jar.
+//
+// Adding a Minecraft version:
+//   1. add a row below (newest first)
+//   2. add nms/<version>/src/main/java/com/tcoded/nochatreports/nms/impl/VersionCompat.java
+//   3. add the version to NmsVersion
+def nmsVersions = [
+    //    module            Paper dev bundle                         bytecode  Spigot reobf   extra shared source sets
+    [name: 'v26_3',    bundle: '26.3.build.+',                  java: 25, reobf: false, shared: ['login']],
+    [name: 'v26_2',    bundle: '26.2.build.+',                  java: 25, reobf: false, shared: ['login']],
+    // Java 21 bytecode so older Paper plugin remappers (ASM 9.7) can still scan the shaded jar
+    [name: 'v26_1_2',  bundle: '26.1.2.build.+',                java: 21, reobf: false, shared: ['login']],
+    [name: 'v1_21_11', bundle: '1.21.11-R0.1-SNAPSHOT',         java: 21, reobf: true,  shared: ['login']],
+    [name: 'v1_21_10', bundle: '1.21.9-R0.1-SNAPSHOT',          java: 21, reobf: true,  shared: ['login']],
+    [name: 'v1_21_8',  bundle: '1.21.8-R0.1-SNAPSHOT',          java: 21, reobf: true,  shared: ['login']],
+    [name: 'v1_21_5',  bundle: '1.21.5-no-moonrise-SNAPSHOT',   java: 21, reobf: true,  shared: ['login']],
+    [name: 'v1_21_4',  bundle: '1.21.4-R0.1-SNAPSHOT',          java: 21, reobf: true,  shared: ['login']],
+    [name: 'v1_21',    bundle: '1.21-R0.1-SNAPSHOT',            java: 21, reobf: true,  shared: ['statusResponse']],
+    [name: 'v1_20_6',  bundle: '1.20.6-R0.1-SNAPSHOT',          java: 21, reobf: true,  shared: ['statusResponse']],
+    [name: 'v1_20_4',  bundle: '1.20.4-R0.1-SNAPSHOT',          java: 17, reobf: true,  shared: ['serverData', 'statusResponse']],
+    [name: 'v1_19_4',  bundle: '1.19.4-R0.1-SNAPSHOT',          java: 17, reobf: true,  shared: ['serverData', 'statusResponse']],
+]
 
 subprojects {
     dependencies {
         compileOnly("io.papermc.paper:paper-api:1.19.4-R0.1-SNAPSHOT")
+    }
+}
+
+// IntelliJ can't attach one source folder to several modules, so each shared source set is compiled
+// in place by the newest version that uses it (edit it there) and from a synced copy everywhere else.
+def sharedSrc = file('shared/src')
+def sourceSetOwner = [:]
+nmsVersions.each { v -> (['main'] + v.shared).each { sourceSetOwner.putIfAbsent(it, v.name) } }
+
+nmsVersions.each { v ->
+    project(":nms:${v.name}") { p ->
+        apply plugin: 'io.papermc.paperweight.userdev'
+
+        int toolchainVersion = v.bundle.startsWith('26.') ? 25 : 21
+
+        dependencies {
+            paperweight.paperDevBundle(v.bundle)
+            compileOnly project(':nms:common')
+        }
+
+        java {
+            toolchain {
+                languageVersion = JavaLanguageVersion.of(toolchainVersion)
+            }
+            sourceCompatibility = JavaVersion.toVersion(v.java)
+            targetCompatibility = JavaVersion.toVersion(v.java)
+        }
+
+        tasks.withType(JavaCompile).configureEach {
+            // Toolchain compiles run in a forked compiler; the server classpath needs more than the default heap
+            options.forkOptions.memoryMaximumSize = '1g'
+        }
+
+        configurations.configureEach {
+            // Accept dev bundle artifacts built for the toolchain even when emitting older bytecode
+            if (canBeResolved && !canBeConsumed) {
+                attributes.attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, toolchainVersion)
+            }
+            resolutionStrategy.dependencySubstitution {
+                substitute module('me.lucko:spark-paper:1.10.84-20240720.204128-1') using module('me.lucko:spark-paper:1.10.133-20250413.112336-1') because 'snapshot version missing from repositories'
+            }
+        }
+
+        def copiedSources = []
+        (['main'] + v.shared).each { set ->
+            def dir = new File(sharedSrc, "${set}/java")
+            if (sourceSetOwner[set] == v.name) sourceSets.main.java.srcDir(dir)
+            else copiedSources << dir
+        }
+        if (copiedSources) {
+            def syncShared = tasks.register('syncSharedSources', Sync) {
+                from copiedSources
+                into p.layout.buildDirectory.dir('generated/sources/shared')
+            }
+            sourceSets.main.java.srcDir(syncShared)
+        }
+
+        def shadowJar = tasks.named('shadowJar') {
+            relocate 'com.tcoded.nochatreports.nms.impl', "com.tcoded.nochatreports.nms.${v.name}"
+        }
+
+        // The jar the plugin shades: reobfuscated to Spigot names for 1.x, as-is for 26.x
+        configurations.create('nmsJar') {
+            canBeConsumed = true
+            canBeResolved = false
+        }
+        if (v.reobf) {
+            def reobfJar = tasks.named('reobfJar') {
+                inputJar = shadowJar.flatMap { it.archiveFile }
+            }
+            artifacts.add('nmsJar', reobfJar.flatMap { it.outputJar }) {
+                builtBy reobfJar
+            }
+        } else {
+            artifacts.add('nmsJar', shadowJar)
+        }
     }
 }

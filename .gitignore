@@ -116,3 +116,5 @@ PluginPoliceFilter.java
 .gradle/
 build/
 *.ignore
+# JVM heap dumps
+*.hprof
